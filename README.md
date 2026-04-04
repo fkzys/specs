@@ -29,6 +29,13 @@ Project-specific information lives in the **repository's own documentation**:
 When in doubt: if a rule wouldn't make sense in a completely unrelated project
 (e.g. a Go CLI tool or a Python daemon), it doesn't belong in this specification.
 
+### 0.1 RULE PRIORITY
+When rules conflict, apply in this order:
+1. Security (`verify-lib`, ownership checks, no `eval`, no `/tmp` for scripts, `SecureDir`)
+2. Correctness (`set -euo pipefail`, error handling, config validation)
+3. Consistency (naming, structure, Makefile targets)
+4. Convenience (shortcuts, defaults)
+
 ## 1. REPOSITORY STRUCTURE
 
 ### Shell / Python / C Projects
@@ -51,7 +58,7 @@ When in doubt: if a rule wouldn't make sense in a completely unrelated project
 | Path | Purpose |
 |------|---------|
 | `cmd/<name>/` | Entry point (`main.go`, `version.go`) |
-| `internal/` | Private packages (`config`, `engine`, `tmpl`, etc.) |
+| `internal/` | Private packages (`config`, `engine`, `tmpl`, `safetemp`, etc.) |
 | `tests.md` | Test documentation (instead of `tests/README.md`) |
 | `go.mod` / `go.sum` | Module definition and dependencies |
 | `Makefile` | `build`, `install`, `uninstall`, `test`, `test-root`, `clean` |
@@ -69,6 +76,7 @@ set -euo pipefail
 ```
 - System scripts: `#!/bin/bash`
 - Libraries: `#!/usr/bin/env bash`
+- If a file is both entry point and library (rare), use `#!/bin/bash`.
 
 ### Secure Library Sourcing
 ```bash
@@ -410,6 +418,147 @@ if (!real) {
 free(real);
 ```
 
+### Security: `verify-lib`
+All library sourcing must pass through `verify-lib`. It resolves symlinks, validates ownership (uid/gid 0), checks for group/world writability, and walks the directory chain to prevent TOCTOU or namespace escape attacks.
+
+**Usage:**
+```bash
+_src() { local p; p=$(verify-lib "$1" "$LIBDIR/") && source "$p" || exit 1; }
+```
+
+**Implementation (`verify-lib.c`):**
+```c
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <limits.h>
+#include <errno.h>
+
+/* Check if running inside a non-init user namespace */
+static int in_user_ns(void) {
+    FILE *f = fopen("/proc/self/uid_map", "r");
+    if (!f) return 0;
+    unsigned int inner, count;
+    unsigned long long outer;
+    int lines = 0, trivial = 0;
+    while (fscanf(f, "%u %llu %u", &inner, &outer, &count) == 3) {
+        lines++;
+        if (inner == 0 && outer == 0 && count >= 1000) trivial = 1;
+    }
+    fclose(f);
+    return !(lines == 1 && trivial);
+}
+
+/* Read kernel overflow uid (shown for unmapped uids in user ns) */
+static unsigned int get_overflow_uid(void) {
+    FILE *f = fopen("/proc/sys/kernel/overflowuid", "r");
+    if (!f) return 65534;
+    unsigned int uid = 65534;
+    if (fscanf(f, "%u", &uid) != 1) uid = 65534;
+    fclose(f);
+    return uid;
+}
+
+/* Check if path resides on a read-only mount */
+static int on_readonly_mount(const char *path) {
+    struct statvfs sv;
+    if (statvfs(path, &sv) != 0) return 0;
+    return (sv.f_flag & ST_RDONLY) != 0;
+}
+
+static int verify_dir_chain(const char *path, const char *prefix,
+                            int userns, unsigned int overflow_uid) {
+    char buf[PATH_MAX];
+    struct stat st;
+    size_t prefix_len = strlen(prefix);
+    if (strnlen(path, PATH_MAX) >= PATH_MAX) return 0;
+    strncpy(buf, path, PATH_MAX - 1);
+    buf[PATH_MAX - 1] = '\0';
+
+    while (strlen(buf) >= prefix_len) {
+        if (lstat(buf, &st) != 0) {
+            fprintf(stderr, "verify-lib: cannot stat %s: %s\n", buf, strerror(errno));
+            return 0;
+        }
+        if (st.st_uid != 0) {
+            if (!(userns && st.st_uid == overflow_uid && on_readonly_mount(buf))) {
+                fprintf(stderr, "verify-lib: %s uid=%d, expected 0\n", buf, st.st_uid);
+                return 0;
+            }
+        }
+        if ((st.st_mode & S_IWGRP) && st.st_gid != 0) {
+            if (!(userns && st.st_gid == overflow_uid && on_readonly_mount(buf))) {
+                fprintf(stderr, "verify-lib: %s group-writable with gid=%d\n", buf, st.st_gid);
+                return 0;
+            }
+        }
+        if ((st.st_mode & S_IWOTH) && !(st.st_mode & S_ISVTX)) {
+            fprintf(stderr, "verify-lib: %s world-writable without sticky\n", buf);
+            return 0;
+        }
+        char *slash = strrchr(buf, '/');
+        if (!slash || slash == buf) break;
+        *slash = '\0';
+    }
+    return 1;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "usage: verify-lib <file> [prefix]\n");
+        return 1;
+    }
+    const char *file = argv[1];
+    const char *prefix = argc == 3 ? argv[2] : "/usr/lib/";
+    int userns = in_user_ns();
+    unsigned int overflow_uid = get_overflow_uid();
+
+    char *real = realpath(file, NULL);
+    if (!real) {
+        fprintf(stderr, "verify-lib: cannot resolve %s: %s\n", file, strerror(errno));
+        return 1;
+    }
+    if (strncmp(real, prefix, strlen(prefix)) != 0) {
+        fprintf(stderr, "verify-lib: %s resolves outside %s\n", real, prefix);
+        free(real); return 1;
+    }
+    struct stat st;
+    if (lstat(real, &st) != 0) {
+        fprintf(stderr, "verify-lib: cannot stat %s: %s\n", real, strerror(errno));
+        free(real); return 1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "verify-lib: %s not a regular file\n", real);
+        free(real); return 1;
+    }
+    if (st.st_uid != 0 || st.st_gid != 0) {
+        if (userns && st.st_uid == overflow_uid && st.st_gid == overflow_uid && on_readonly_mount(real)) {
+            /* unmapped root on ro mount inside user ns */
+        } else {
+            fprintf(stderr, "verify-lib: %s ownership %d:%d, expected 0:0\n", real, st.st_uid, st.st_gid);
+            free(real); return 1;
+        }
+    }
+    if (st.st_mode & (S_IWGRP | S_IWOTH)) {
+        fprintf(stderr, "verify-lib: %s writable by non-root (mode=%04o)\n", real, st.st_mode & 07777);
+        free(real); return 1;
+    }
+    if (userns && !on_readonly_mount(real)) {
+        fprintf(stderr, "verify-lib: %s on writable mount in user ns\n", real);
+        free(real); return 1;
+    }
+    if (!verify_dir_chain(real, prefix, userns, overflow_uid)) {
+        free(real); return 1;
+    }
+    printf("%s\n", real);
+    free(real);
+    return 0;
+}
+```
+
 ## 6. GO
 
 ### CLI Structure (manual parsing, no flag/cobra)
@@ -430,25 +579,14 @@ func main() {
 
 func run() error {
     args := os.Args[1:]
-
-    if len(args) == 0 {
-        return usageError()
-    }
-
+    if len(args) == 0 { return usageError() }
     cmd := args[0]
     flags := args[1:]
-
     switch cmd {
-    case "subcmd":
-        return cmdSubcmd(flags)
-    case "help", "--help", "-h":
-        printUsage()
-        return nil
-    case "version", "--version", "-V":
-        cmdVersion()
-        return nil
-    default:
-        return fmt.Errorf("unknown command %q\nrun 'project help' for usage", cmd)
+    case "subcmd": return cmdSubcmd(flags)
+    case "help", "--help", "-h": printUsage(); return nil
+    case "version", "--version", "-V": cmdVersion(); return nil
+    default: return fmt.Errorf("unknown command %q\nrun 'project help' for usage", cmd)
     }
 }
 ```
@@ -483,9 +621,7 @@ func Load(path string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-    if c.Dest == "" {
-        return fmt.Errorf("dest is required")
-    }
+    if c.Dest == "" { return fmt.Errorf("dest is required") }
     return nil
 }
 ```
@@ -505,44 +641,66 @@ func Render(content string, name string, data map[string]any) ([]byte, error) {
     if err != nil {
         return nil, fmt.Errorf("parse template %s: %w", name, err)
     }
-
     var buf bytes.Buffer
     if err := tmpl.Execute(&buf, data); err != nil {
         return nil, fmt.Errorf("execute template %s: %w", name, err)
     }
-
     return buf.Bytes(), nil
 }
 ```
 
 ### Secure Temp Directory
+Prevents symlink race attacks in `/tmp`. Uses XDG runtime dir first, falls back to user state dir. Always `0700`.
 ```go
-func SecureDir() string {
-    // Priority: XDG_RUNTIME_DIR > $HOME/.local/state
-    // Create with 0700 permissions
-    // Prevents symlink race attacks in /tmp
+package safetemp
+
+import (
+    "os"
+    "path/filepath"
+)
+
+// SecureDir returns a directory suitable for temporary files that should
+// not be accessible to other users. The directory is created with mode 0700
+// if it does not exist.
+//
+// Priority:
+//  1. $XDG_RUNTIME_DIR/<project>/       — typically /run/user/<uid>, mode 0700
+//  2. $HOME/.local/state/<project>/tmp/ — user state directory, mode 0700
+//  3. ""                                — fallback (caller should handle)
+func SecureDir(project string) string {
+    dirs := secureDirs(project)
+    for _, dir := range dirs {
+        if err := os.MkdirAll(dir, 0o700); err == nil {
+            return dir
+        }
+    }
+    return ""
+}
+
+func secureDirs(project string) []string {
+    var result []string
+    if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+        result = append(result, filepath.Join(dir, project))
+    }
+    if home, err := os.UserHomeDir(); err == nil {
+        result = append(result, filepath.Join(home, ".local", "state", project, "tmp"))
+    }
+    return result
 }
 ```
 
 ### Script Execution (secure)
 ```go
 func execScript(content []byte, shell string) error {
-    dir := safetemp.SecureDir()
+    dir := safetemp.SecureDir("project")
     tmp, err := os.CreateTemp(dir, "project-script-*.sh")
-    if err != nil {
-        return err
-    }
+    if err != nil { return err }
     defer os.Remove(tmp.Name())
 
-    if _, err := tmp.Write(content); err != nil {
-        tmp.Close()
-        return err
-    }
+    if _, err := tmp.Write(content); err != nil { tmp.Close(); return err }
     tmp.Close()
 
-    if err := os.Chmod(tmp.Name(), 0o700); err != nil {
-        return err
-    }
+    if err := os.Chmod(tmp.Name(), 0o700); err != nil { return err }
 
     cmd := exec.Command(shell, tmp.Name())
     cmd.Stdout = os.Stdout
@@ -587,9 +745,7 @@ func TestExpandHome(t *testing.T) {
 ### Root-Only Tests
 ```go
 func skipIfNotRoot(t *testing.T) {
-    if os.Geteuid() != 0 {
-        t.Skip("requires root")
-    }
+    if os.Geteuid() != 0 { t.Skip("requires root") }
 }
 
 func TestApplyActions(t *testing.T) {
@@ -661,6 +817,156 @@ Standard pytest suites. No system access — all filesystem operations use `tmp_
 - No root privileges required
 - No real disks, partitions, or volumes are touched
 - Python tests use pytest's `tmp_path` fixture
+
+### `test_harness.sh` — Standard Pattern
+```bash
+#!/usr/bin/env bash
+# tests/test_harness.sh
+#
+# Shared test harness for unit tests.
+# Sourced by individual test files — NOT run directly.
+
+set -uo pipefail
+
+PASS=0; FAIL=0; TESTS=0
+
+# ── Test helpers ─────────────────────────────────────────────
+ok() { PASS=$((PASS + 1)); TESTS=$((TESTS + 1)); echo "  ✓ $1"; }
+fail() { FAIL=$((FAIL + 1)); TESTS=$((TESTS + 1)); echo "  ✗ $1"; }
+
+assert_eq() {
+    local desc="$1" expected="$2" actual="$3"
+    if [[ "$expected" == "$actual" ]]; then ok "$desc"
+    else fail "$desc (expected='$expected', got='$actual')"; fi
+}
+
+assert_match() {
+    local desc="$1" pattern="$2" actual="$3"
+    if [[ "$actual" =~ $pattern ]]; then ok "$desc"
+    else fail "$desc (pattern='$pattern' not found in '$actual')"; fi
+}
+
+assert_contains() {
+    local desc="$1" needle="$2" haystack="$3"
+    if [[ "$haystack" == *"$needle"* ]]; then ok "$desc"
+    else fail "$desc (needle='$needle' not in output)"; fi
+}
+
+assert_not_contains() {
+    local desc="$1" needle="$2" haystack="$3"
+    if [[ "$haystack" != *"$needle"* ]]; then ok "$desc"
+    else fail "$desc (needle='$needle' unexpectedly found)"; fi
+}
+
+assert_file_exists() {
+    local desc="$1" path="$2"
+    if [[ -e "$path" ]]; then ok "$desc"
+    else fail "$desc (missing: $path)"; fi
+}
+
+assert_file_not_exists() {
+    local desc="$1" path="$2"
+    if [[ ! -e "$path" ]]; then ok "$desc"
+    else fail "$desc (unexpected: $path)"; fi
+}
+
+assert_file_contains() {
+    local desc="$1" needle="$2" file="$3"
+    if grep -qF "$needle" "$file" 2>/dev/null; then ok "$desc"
+    else fail "$desc (needle='$needle' not in $file)"; fi
+}
+
+# Run command in subshell, capture rc + combined stdout/stderr.
+# Sets globals: _rc, _out
+run_cmd() {
+    _rc=0; _out=$("$@" 2>&1) || _rc=$?
+}
+
+assert_rc() {
+    local desc="$1" expected="$2"; shift 2
+    local rc=0; "$@" >/dev/null 2>&1 || rc=$?
+    assert_eq "$desc" "$expected" "$rc"
+}
+
+section() { echo ""; echo "── $1 ──"; }
+
+# ── Mock call tracking ──────────────────────────────────────
+mock_call_count() {
+    local name="$1" log="${TESTDIR}/mock_calls_${name}.log"
+    if [[ -f "$log" ]]; then wc -l < "$log" | tr -d ' '; else echo "0"; fi
+}
+mock_last_args() {
+    local name="$1" log="${TESTDIR}/mock_calls_${name}.log"
+    if [[ -f "$log" ]]; then tail -1 "$log"; else echo ""; fi
+}
+mock_clear_log() {
+    local name="$1" log="${TESTDIR}/mock_calls_${name}.log"
+    : > "$log"
+}
+
+# ── Setup test environment ───────────────────────────────────
+TESTDIR=$(mktemp -d)
+trap 'rm -rf "$TESTDIR"' EXIT
+MOCK_BIN="${TESTDIR}/mock_bin"
+mkdir -p "$MOCK_BIN"
+ORIG_PATH="$PATH"
+export PATH="${MOCK_BIN}:${PATH}"
+
+make_mock() {
+    local name="$1"; shift
+    local body="${*:-exit 0}"
+    local log_file="${TESTDIR}/mock_calls_${name}.log"
+    : > "$log_file"
+    cat > "${MOCK_BIN}/${name}" <<ENDSCRIPT
+#!/bin/bash
+printf '%s\n' "\$*" >> "${log_file}"
+${body}
+ENDSCRIPT
+    chmod +x "${MOCK_BIN}/${name}"
+}
+
+make_mock_in() {
+    local dir="$1" name="$2"; shift 2
+    local body="${*:-exit 0}"
+    mkdir -p "$dir"
+    cat > "${dir}/${name}" <<ENDSCRIPT
+#!/bin/bash
+${body}
+ENDSCRIPT
+    chmod +x "${dir}/${name}"
+}
+
+# ── Reset project globals ────────────────────────────────────
+# Override this in your test file to clear project-specific state.
+reset_globals() { :; }
+
+# ── Default mocks ────────────────────────────────────────────
+REAL_STAT=$(command -v stat 2>/dev/null || echo /usr/bin/stat)
+make_mock stat "
+if [[ \"\${1:-}\" == \"-c\" && \"\${2:-}\" == \"%u\" ]]; then
+    echo \"0\"
+else
+    exec \"${REAL_STAT}\" \"\$@\"
+fi
+"
+make_mock findmnt    'echo ""'
+make_mock mountpoint 'exit 0'
+make_mock python3    'echo ""'
+make_mock mount      'exit 0'
+make_mock btrfs      'exit 0'
+make_mock flock      'exit 0'
+make_mock df         'echo ""'
+
+# ── Summary ──────────────────────────────────────────────────
+summary() {
+    local name="${0##*/}"
+    echo ""
+    echo "════════════════════════════════════"
+    echo " ${name}: ${PASS} passed, ${FAIL} failed (total: ${TESTS})"
+    echo "════════════════════════════════════"
+    if [[ $FAIL -ne 0 ]]; then exit 1; fi
+    exit 0
+}
 ```
 
 ### Go: `tests.md`
@@ -701,43 +1007,6 @@ Guarded by `skipIfNotRoot`. Run via `make test-root` (sudo).
 - No root privileges required except `internal/perms` apply tests
 - No real home directories or system files are touched
 - Root-only tests skip with `t.Skip("requires root")` when run as non-root
-```
-
-### test_harness.sh — Pattern
-```bash
-#!/bin/bash
-set -euo pipefail
-
-TESTDIR=$(mktemp -d)
-trap 'rm -rf "$TESTDIR"' EXIT
-
-MOCK_BIN="${TESTDIR}/mock_bin"
-mkdir -p "$MOCK_BIN"
-export PATH="${MOCK_BIN}:${PATH}"
-
-make_mock() {
-    local name="$1"
-    cat > "${MOCK_BIN}/${name}" << 'MOCK'
-#!/bin/bash
-echo "$@" >> "${TESTDIR}/mock_calls.log"
-MOCK
-    chmod +x "${MOCK_BIN}/${name}"
-}
-
-assert_eq() {
-    if [[ "$1" != "$2" ]]; then
-        echo "FAIL: expected '$2', got '$1'" >&2
-        return 1
-    fi
-}
-
-ok() {
-    if ! "$@"; then
-        echo "FAIL: $*" >&2
-        return 1
-    fi
-}
-```
 
 ## 8. COMPLETIONS
 
@@ -845,7 +1114,14 @@ system:ukify
 gitpkg:verify-lib
 ```
 
-## 11. CODE GENERATION PROTOCOL
+**Dependency types:**
+- `system:<pkg>` — Package from the system repository manager (pacman, apt, dnf). Installed via standard package manager.
+- `gitpkg:<name>` — Project managed by `gitpkg`. Resolved from configured base URLs or collections. Cloned, built, and installed via `gitpkg install <name>`.
+- `# comment` — Ignored by parsers.
+
+## 11. CODE GENERATION PROTOCOL (LLM INSTRUCTIONS)
+
+> **Note:** This section governs how you generate code, not the code itself. Apply these rules when responding to requests in this ecosystem.
 
 1. **Verify structure** (`Makefile`, `depends`, `lib/`, `tests/` or `tests.md`) before adding files.
 2. **Apply standards automatically**: `set -euo pipefail`, whitelist config parser, `verify-lib` sourcing, `printf -v` instead of `eval`, explicit shopt restore.
