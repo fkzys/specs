@@ -1,0 +1,843 @@
+# LLM PROJECT CONTEXT — fkzys Ecosystem
+
+You are an assistant for creating system utilities, packages, and infrastructure for Arch Linux.
+When generating code, strictly follow the rules below. They are derived from real projects, not generic best practices.
+
+## 1. REPOSITORY STRUCTURE
+
+### Shell / Python / C Projects
+| Path | Purpose |
+|------|---------|
+| `bin/` | Entry points: shell scripts, compiled binaries |
+| `lib/` | Shared libraries: `common.sh`, Python modules, C code |
+| `etc/` | Default configuration files (installed to `/etc/`) |
+| `completions/` | `_cmd` (zsh), `cmd.bash` (bash) |
+| `man/` | Markdown sources (`.md`) + compiled roff (`.8`/`.5`) |
+| `tests/` | Test suite. Must include `tests/README.md` with table and instructions |
+| `depends` | Dependencies. Format: `system:pkg` or `gitpkg:pkg`. `#` for comments |
+| `Makefile` | Targets: `build` (if needed), `install`, `uninstall`, `clean`, `test`, `man` |
+| `backup/` | Migration/backup scripts |
+| `hooks/` | Pacman/systemd hooks |
+| `systemd/` | Service units: `user/` or `system/` |
+| `extras/` | Additional scripts (wrappers, helpers) |
+
+### Go Projects
+| Path | Purpose |
+|------|---------|
+| `cmd/<name>/` | Entry point (`main.go`, `version.go`) |
+| `internal/` | Private packages (`config`, `engine`, `tmpl`, etc.) |
+| `tests.md` | Test documentation (instead of `tests/README.md`) |
+| `go.mod` / `go.sum` | Module definition and dependencies |
+| `Makefile` | `build`, `install`, `uninstall`, `test`, `test-root`, `clean` |
+
+## 2. SHELL (BASH)
+
+### Header & Strictness
+```bash
+#!/bin/bash
+# /usr/bin/project-name
+#
+# Utility description.
+#
+set -euo pipefail
+```
+- System scripts: `#!/bin/bash`
+- Libraries: `#!/usr/bin/env bash`
+
+### Secure Library Sourcing
+```bash
+readonly LIBDIR="/usr/lib/project"
+_src() { local p; p=$(verify-lib "$1" "$LIBDIR/") && source "$p" || exit 1; }
+_src "${LIBDIR}/common.sh"
+```
+
+### Error Handling
+```bash
+echo "ERROR: Description of the error" >&2; exit 1
+```
+- All errors go to stderr
+- Prefix `ERROR:` for fatal, `WARN:` for non-fatal
+- `exit 1` on fatal errors
+
+### Config Parsing (whitelist-based, NO eval)
+```bash
+load_config() {
+    [[ -f "$CONFIG_FILE" ]] || return 0
+
+    # Verify ownership
+    local owner
+    owner=$(stat -c %u "$CONFIG_FILE" 2>/dev/null)
+    if [[ "$owner" != "0" ]]; then
+        echo "ERROR: $CONFIG_FILE not owned by root (owner uid: $owner)" >&2
+        return 1
+    fi
+
+    local -a allowed=(KEY1 KEY2 KEY3)
+
+    while IFS='=' read -r key value; do
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        value="${value%% #*}"
+        value="${value%"${value##*[![:space:]]}"}"
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+
+        local valid=0
+        for a in "${allowed[@]}"; do
+            [[ "$key" == "$a" ]] && { valid=1; break; }
+        done
+
+        if [[ $valid -eq 1 ]]; then
+            value="${value#\"}"; value="${value%\"}"
+            value="${value#\'}"; value="${value%\'}"
+            printf -v "$key" '%s' "$value"
+        else
+            echo "WARN: Unknown config key ignored: $key" >&2
+        fi
+    done < "$CONFIG_FILE"
+}
+```
+
+### Cleanup Trap
+```bash
+cleanup() {
+    local exit_code=$?
+    set +e
+    [[ $exit_code -ne 0 ]] && echo ":: Cleaning up..."
+    # ... cleanup logic ...
+    return $exit_code
+}
+trap cleanup EXIT
+```
+
+### Variable Validation
+```bash
+[[ -n "${VAR:-}" ]] || { echo "ERROR: VAR not defined" >&2; exit 1; }
+```
+
+### Nameref for Arrays (bwrap-common pattern)
+```bash
+bwrap_base() {
+    local -n _arr=$1
+    _arr+=(--ro-bind /usr /usr --proc /proc)
+}
+```
+
+### Preserve/Restore shopt (NO eval)
+```bash
+# Save state explicitly
+local _had_nullglob=false
+shopt -q nullglob && _had_nullglob=true
+
+shopt -s nullglob
+# ... glob operations ...
+
+# Restore explicitly
+if $_had_nullglob; then
+    shopt -s nullglob
+else
+    shopt -u nullglob
+fi
+```
+
+### Input Validation
+```bash
+if [[ ! "$INPUT" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "ERROR: Invalid input" >&2; exit 1
+fi
+```
+
+## 3. MAKEFILE
+
+### Shell / Python / C Base Structure
+```makefile
+.PHONY: install uninstall clean test man
+
+PREFIX     = /usr
+SYSCONFDIR = /etc
+DESTDIR    =
+pkgname    = project-name
+
+BINDIR       = $(PREFIX)/bin
+LIBDIR       = $(PREFIX)/lib/project
+SHAREDIR     = $(PREFIX)/share
+MANDIR       = $(SHAREDIR)/man
+ZSH_COMPDIR  = $(SHAREDIR)/zsh/site-functions
+BASH_COMPDIR = $(SHAREDIR)/bash-completion/completions
+LICENSEDIR   = $(SHAREDIR)/licenses/$(pkgname)
+
+MANPAGES = man/project.8
+
+man: $(MANPAGES)
+
+man/%.8: man/%.8.md
+	pandoc -s -t man -o $@ $<
+
+clean:
+	rm -f $(MANPAGES)
+
+test:
+	bash tests/test.sh
+
+install:
+	install -Dm755 bin/project $(DESTDIR)$(BINDIR)/project
+	install -Dm644 lib/common.sh $(DESTDIR)$(LIBDIR)/common.sh
+	install -Dm644 completions/_project $(DESTDIR)$(ZSH_COMPDIR)/_project
+	install -Dm644 completions/project.bash $(DESTDIR)$(BASH_COMPDIR)/project
+	install -Dm644 man/project.8 $(DESTDIR)$(MANDIR)/man8/project.8
+	install -Dm644 LICENSE $(DESTDIR)$(LICENSEDIR)/LICENSE
+
+	@if [ ! -f "$(DESTDIR)$(SYSCONFDIR)/project.conf" ]; then \
+		install -Dm644 etc/project.conf "$(DESTDIR)$(SYSCONFDIR)/project.conf"; \
+		echo "Installed default config"; \
+	else \
+		echo "Config exists, skipping (see etc/project.conf for defaults)"; \
+	fi
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/project
+	rm -rf $(DESTDIR)$(LIBDIR)/
+	rm -f $(DESTDIR)$(ZSH_COMPDIR)/_project
+	rm -f $(DESTDIR)$(BASH_COMPDIR)/project
+	rm -f $(DESTDIR)$(MANDIR)/man8/project.8
+	rm -rf $(DESTDIR)$(LICENSEDIR)/
+	@echo "Note: $(SYSCONFDIR)/project.conf preserved. Remove manually if needed."
+```
+
+### Go Makefile
+```makefile
+.PHONY: build install uninstall test test-root clean
+
+PREFIX   = /usr
+DESTDIR  =
+pkgname  = project-name
+
+BINDIR     = $(PREFIX)/bin
+LICENSEDIR = $(PREFIX)/share/licenses/$(pkgname)
+
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+
+BINARY = project-name
+
+build:
+	CGO_ENABLED=0 go build -trimpath -buildmode=pie -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/project-name/
+
+test:
+	go test ./...
+
+test-root:
+	sudo go test ./internal/perms/ -v -count=1
+
+clean:
+	rm -f $(BINARY)
+
+install: build
+	install -Dm755 $(BINARY) $(DESTDIR)$(BINDIR)/$(BINARY)
+	install -Dm644 LICENSE   $(DESTDIR)$(LICENSEDIR)/LICENSE
+
+uninstall:
+	rm -f  $(DESTDIR)$(BINDIR)/$(BINARY)
+	rm -rf $(DESTDIR)$(LICENSEDIR)/
+```
+
+### Key Conventions
+- `PREFIX = /usr` (not `/usr/local`)
+- `DESTDIR =` (empty by default)
+- Config is never overwritten if it already exists
+- `man` target generates from `.md` via `pandoc`
+- `test` runs shell scripts and pytest separately
+- License installs to `$(SHAREDIR)/licenses/$(pkgname)`
+- Go: `CGO_ENABLED=0`, `-trimpath`, `-buildmode=pie`, version via `-ldflags`
+
+## 4. PYTHON
+
+### Entry Point
+```python
+#!/usr/bin/env python3
+"""
+CLI entry point for project-name.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="project-name")
+    parser.add_argument("--version", action="version", version="%(prog)s 0.1.0")
+    args = parser.parse_args()
+    # ... logic ...
+
+if __name__ == "__main__":
+    main()
+```
+
+### `__main__.py`
+```python
+"""Allow running as `python -m project_name`."""
+
+from .cli import main
+
+main()
+```
+
+### Error Handling
+```python
+print(f"Error: description of the error", file=sys.stderr)
+sys.exit(1)
+```
+
+### Tests (unittest-style with pytest)
+```python
+"""Tests for project_name/module.py — pure parsing functions."""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from project_name.module import function_under_test
+
+
+class TestFunctionUnderTest:
+    def test_normal_case(self):
+        assert function_under_test("input") == "expected"
+
+    def test_edge_case(self):
+        assert function_under_test("") is None
+```
+
+### SOPS Helper (Infrastructure)
+```python
+import subprocess
+import sys
+from pathlib import Path
+import yaml
+
+
+def decrypt_sops(file_path: Path) -> dict:
+    try:
+        result = subprocess.run(
+            ['sops', '-d', str(file_path)],
+            capture_output=True, text=True, check=True
+        )
+        return yaml.safe_load(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"SOPS decryption error: {e.stderr}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print("sops not found in PATH", file=sys.stderr)
+        sys.exit(1)
+```
+
+## 5. C
+
+### Style & Flags
+```c
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <limits.h>
+#include <errno.h>
+```
+
+### Makefile
+```makefile
+PREFIX  = /usr
+DESTDIR =
+
+CC     ?= cc
+CFLAGS ?= -O2 -Wall -Wextra -Werror
+
+.PHONY: build install uninstall clean
+
+build:
+	$(CC) $(CFLAGS) -o project project.c
+
+install:
+	install -Dm755 project $(DESTDIR)$(PREFIX)/bin/project
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/project
+
+clean:
+	rm -f project
+```
+
+### Error Handling
+```c
+fprintf(stderr, "project: description of error: %s\n", strerror(errno));
+return 1;
+```
+
+### Safe Path Handling
+```c
+char *real = realpath(file, NULL);
+if (!real) {
+    fprintf(stderr, "project: cannot resolve %s: %s\n", file, strerror(errno));
+    return 1;
+}
+// ... use real ...
+free(real);
+```
+
+## 6. GO
+
+### CLI Structure (manual parsing, no flag/cobra)
+```go
+package main
+
+import (
+    "fmt"
+    "os"
+)
+
+func main() {
+    if err := run(); err != nil {
+        fmt.Fprintf(os.Stderr, "project: %v\n", err)
+        os.Exit(1)
+    }
+}
+
+func run() error {
+    args := os.Args[1:]
+
+    if len(args) == 0 {
+        return usageError()
+    }
+
+    cmd := args[0]
+    flags := args[1:]
+
+    switch cmd {
+    case "subcmd":
+        return cmdSubcmd(flags)
+    case "help", "--help", "-h":
+        printUsage()
+        return nil
+    case "version", "--version", "-V":
+        cmdVersion()
+        return nil
+    default:
+        return fmt.Errorf("unknown command %q\nrun 'project help' for usage", cmd)
+    }
+}
+```
+
+### Error Handling
+```go
+return fmt.Errorf("operation failed: %w", err)
+```
+- Wrap errors with `%w` for context
+- Print to stderr in `main()` only: `fmt.Fprintf(os.Stderr, "project: %v\n", err)`
+- `os.Exit(1)` on fatal errors
+
+### Config (TOML with BurntSushi)
+```go
+import "github.com/BurntSushi/toml"
+
+type Config struct {
+    Dest    string `toml:"dest"`
+    Shell   string `toml:"shell"`
+    Prompts map[string]PromptConfig `toml:"prompts"`
+}
+
+func Load(path string) (*Config, error) {
+    var cfg Config
+    if _, err := toml.DecodeFile(path, &cfg); err != nil {
+        return nil, fmt.Errorf("parse %s: %w", path, err)
+    }
+    if err := cfg.validate(); err != nil {
+        return nil, fmt.Errorf("%s: %w", path, err)
+    }
+    return &cfg, nil
+}
+
+func (c *Config) validate() error {
+    if c.Dest == "" {
+        return fmt.Errorf("dest is required")
+    }
+    return nil
+}
+```
+
+### Template Rendering (text/template)
+```go
+import (
+    "bytes"
+    "text/template"
+)
+
+func Render(content string, name string, data map[string]any) ([]byte, error) {
+    tmpl, err := template.New(name).
+        Funcs(FuncMap()).
+        Option("missingkey=error").
+        Parse(content)
+    if err != nil {
+        return nil, fmt.Errorf("parse template %s: %w", name, err)
+    }
+
+    var buf bytes.Buffer
+    if err := tmpl.Execute(&buf, data); err != nil {
+        return nil, fmt.Errorf("execute template %s: %w", name, err)
+    }
+
+    return buf.Bytes(), nil
+}
+```
+
+### Secure Temp Directory
+```go
+func SecureDir() string {
+    // Priority: XDG_RUNTIME_DIR > $HOME/.local/state
+    // Create with 0700 permissions
+    // Prevents symlink race attacks in /tmp
+}
+```
+
+### Script Execution (secure)
+```go
+func execScript(content []byte, shell string) error {
+    dir := safetemp.SecureDir()
+    tmp, err := os.CreateTemp(dir, "project-script-*.sh")
+    if err != nil {
+        return err
+    }
+    defer os.Remove(tmp.Name())
+
+    if _, err := tmp.Write(content); err != nil {
+        tmp.Close()
+        return err
+    }
+    tmp.Close()
+
+    if err := os.Chmod(tmp.Name(), 0o700); err != nil {
+        return err
+    }
+
+    cmd := exec.Command(shell, tmp.Name())
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
+    cmd.Stdin = os.Stdin
+    return cmd.Run()
+}
+```
+
+### Tests (standard testing package)
+```go
+package config
+
+import (
+    "os"
+    "path/filepath"
+    "testing"
+)
+
+func TestExpandHome(t *testing.T) {
+    tests := []struct {
+        name  string
+        input string
+        want  string
+    }{
+        {"tilde only", "~", "/home/user"},
+        {"tilde path", "~/.config", "/home/user/.config"},
+        {"absolute", "/etc/passwd", "/etc/passwd"},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            got := expandHome(tt.input)
+            if got != tt.want {
+                t.Errorf("expandHome(%q) = %q, want %q", tt.input, got, tt.want)
+            }
+        })
+    }
+}
+```
+
+### Root-Only Tests
+```go
+func skipIfNotRoot(t *testing.T) {
+    if os.Geteuid() != 0 {
+        t.Skip("requires root")
+    }
+}
+
+func TestApplyActions(t *testing.T) {
+    skipIfNotRoot(t)
+    // ... tests that require chmod/chown ...
+}
+```
+
+### Dependency Injection for Testing
+```go
+// Inject isDirFunc to avoid real filesystem lookups in tests
+func ComputeActions(rules []PermRule, managedPaths []string, dest string, isDirFunc func(string) bool) []Action {
+    if isDirFunc == nil {
+        isDirFunc = func(p string) bool {
+            info, err := os.Stat(p)
+            return err == nil && info.IsDir()
+        }
+    }
+    // ...
+}
+```
+
+### Build Flags
+```makefile
+CGO_ENABLED=0 go build -trimpath -buildmode=pie -ldflags "-X main.version=$(VERSION)" -o $(BINARY) ./cmd/project/
+```
+
+## 7. TESTING
+
+### Shell/Python: `tests/README.md`
+```markdown
+# Tests
+
+## Overview
+
+| File | Language | Framework | What it tests |
+|------|----------|-----------|---------------|
+| `test_config.sh` | Bash | Custom assertions | Config loading, parsing, quoting |
+| `test_integration.sh` | Bash | Custom assertions | End-to-end flow |
+| `test_module.py` | Python | pytest | Pure functions |
+
+## Running
+
+```bash
+# All tests
+make test
+
+# Individual suites
+bash tests/test_config.sh
+python -m pytest tests/test_module.py -v
+```
+
+## How they work
+
+### Bash unit tests
+All unit test files source `test_harness.sh`, which provides:
+- **Assertion functions**: `ok`/`fail`/`assert_eq`/`assert_match`/`assert_contains`/`assert_rc`/`run_cmd`
+- **Mock call tracking**: `mock_call_count`, `mock_last_args`, `mock_clear_log`
+- **Temporary directory**: `$TESTDIR` cleaned up via `trap EXIT`
+- **Global state isolation**: `reset_globals()` between test sections
+- **Mock framework**: `make_mock` (writes scripts to `$MOCK_BIN` with call logging)
+- **Default mocks**: `stat`, `findmnt`, `mountpoint`, `python3`, `mount`, `btrfs`, `flock`, `df`
+
+### Python tests
+Standard pytest suites. No system access — all filesystem operations use `tmp_path`, all subprocess calls are mocked.
+
+## Test environment
+- Bash tests create a temporary directory (`mktemp -d`) cleaned up via `trap EXIT`
+- No root privileges required
+- No real disks, partitions, or volumes are touched
+- Python tests use pytest's `tmp_path` fixture
+```
+
+### Go: `tests.md`
+```markdown
+# Tests
+
+## Overview
+
+| Package | File | What it tests |
+|---------|------|---------------|
+| `internal/config` | `config_test.go` | Parsing, validation, defaults |
+| `internal/engine` | `status_test.go` | Status reporting, template rendering |
+| `internal/perms` | `apply_test.go` | Permission computation and application |
+
+## Running
+
+```bash
+# All tests (no root)
+make test
+
+# Individual package
+go test ./internal/config/ -v
+
+# Perms tests that require root (chmod/chown/full pipeline)
+make test-root
+```
+
+## How they work
+
+### Unit tests
+All tests use Go's standard `testing` package with `t.TempDir()` for filesystem isolation. No external test frameworks.
+
+### Root-only tests
+Guarded by `skipIfNotRoot`. Run via `make test-root` (sudo).
+
+## Test environment
+- All tests create temporary directories via `t.TempDir()`, cleaned up automatically
+- No root privileges required except `internal/perms` apply tests
+- No real home directories or system files are touched
+- Root-only tests skip with `t.Skip("requires root")` when run as non-root
+```
+
+### test_harness.sh — Pattern
+```bash
+#!/bin/bash
+set -euo pipefail
+
+TESTDIR=$(mktemp -d)
+trap 'rm -rf "$TESTDIR"' EXIT
+
+MOCK_BIN="${TESTDIR}/mock_bin"
+mkdir -p "$MOCK_BIN"
+export PATH="${MOCK_BIN}:${PATH}"
+
+make_mock() {
+    local name="$1"
+    cat > "${MOCK_BIN}/${name}" << 'MOCK'
+#!/bin/bash
+echo "$@" >> "${TESTDIR}/mock_calls.log"
+MOCK
+    chmod +x "${MOCK_BIN}/${name}"
+}
+
+assert_eq() {
+    if [[ "$1" != "$2" ]]; then
+        echo "FAIL: expected '$2', got '$1'" >&2
+        return 1
+    fi
+}
+
+ok() {
+    if ! "$@"; then
+        echo "FAIL: $*" >&2
+        return 1
+    fi
+}
+```
+
+## 8. COMPLETIONS
+
+### Zsh (`_cmd`)
+```zsh
+#compdef project-name
+
+_project_name() {
+    local context state state_descr line
+    typeset -A opt_args
+
+    _arguments -C \
+        '(- *)'{-h,--help}'[Show help]' \
+        '1:command:((
+            subcmd1\:"Description"
+            subcmd2\:"Description"
+        ))' \
+        '*::arg:->args' \
+        && return
+
+    case $state in
+        args)
+            case ${words[1]} in
+                subcmd1)
+                    _arguments \
+                        '(-n --dry-run)'{-n,--dry-run}'[Dry run]' \
+                        '*:arg:_files'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_project_name "$@"
+```
+
+### Bash (`cmd.bash`)
+```bash
+# completions/project-name.bash
+# bash completion for project-name
+
+_project_name() {
+    local cur prev words cword
+    _init_completion || return
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "subcmd1 subcmd2 -h --help" -- "$cur") )
+        return
+    fi
+
+    case "${words[1]}" in
+        subcmd1)
+            COMPREPLY=( $(compgen -W "-n --dry-run" -- "$cur") )
+            ;;
+    esac
+}
+
+complete -F _project_name project-name
+```
+
+## 9. INFRASTRUCTURE (Python + Jinja2 + SOPS)
+
+### ServiceDeployer Pattern
+```python
+class ServiceDeployer:
+    def __init__(self, config: dict):
+        self.files = config['files']
+        self.setup_dirs = config.get('setup_dirs', [])
+        self.restart_cmd = config.get('restart_cmd')
+        self.templates_dir = config['templates_dir']
+        self.secrets_file = config['secrets_file']
+
+    def _get_env(self):
+        return create_jinja_env(self.templates_dir)
+
+    def deploy(self, hosts, secrets, env, no_restart=False):
+        target, port = resolve_target(hosts, secrets['host'])
+        for entry in self.files:
+            tpl, rp, opts = entry[0], entry[1], entry[2] if len(entry) == 3 else {}
+            rendered = env.get_template(tpl).render(**secrets)
+            # rsync + chown/chmod via SSH
+```
+
+### Jinja2 Templates
+```jinja2
+# Managed by infra repo — {{ instance_name }}
+HostKeyAlgorithms rsa-sha2-512,rsa-sha2-256,ssh-ed25519
+AllowUsers {{ common.ssh_allowed_users | join(' ') }}
+Port {{ instance.ssh_port | default(common.ssh_port) }}
+
+{% for user in common.ssh_otp_users %}
+Match User {{ user }}
+    AuthenticationMethods keyboard-interactive
+{% endfor %}
+```
+
+## 10. DEPENDS
+
+Format: one line per dependency. Comments use `#`.
+```
+# system
+system:python3
+system:btrfs
+system:ukify
+gitpkg:verify-lib
+```
+
+## 11. CODE GENERATION PROTOCOL
+
+1. **Verify structure** (`Makefile`, `depends`, `lib/`, `tests/` or `tests.md`) before adding files.
+2. **Apply standards automatically**: `set -euo pipefail`, whitelist config parser, `verify-lib` sourcing, `printf -v` instead of `eval`, explicit shopt restore.
+3. **No placeholders**. Provide complete, runnable code.
+4. **Include tests** or update test documentation when adding features.
+5. **Flag** `eval`, `chmod 777`, hardcoded secrets, missing ownership checks, `/tmp` usage for scripts.
+6. **Ask if uncertain** about paths, versions, or flags before generating.
+
+## 12. QUICK TEMPLATES
+
+- Shell header: `#!/bin/bash\nset -euo pipefail`
+- Library header: `#!/usr/bin/env bash`
+- Error: `echo "ERROR: msg" >&2; exit 1`
+- Config check: `[[ -n "${VAR:-}" ]] || { echo "ERROR: VAR not defined" >&2; exit 1; }`
+- Make install: `install -Dm755 bin/cmd $(DESTDIR)$(PREFIX)/bin/cmd`
+- Python entry: `if __name__ == "__main__": main()`
+- Go main: `func main() { if err := run(); err != nil { fmt.Fprintf(os.Stderr, "project: %v\n", err); os.Exit(1) } }`
+- Go build: `CGO_ENABLED=0 go build -trimpath -buildmode=pie -ldflags "-X main.version=$(VERSION)"`
+- Test run: `make test` or `bash tests/test.sh` or `python -m pytest tests/ -v` or `go test ./...`
+- Man compile: `pandoc -s -t man cmd.8.md -o cmd.8`
+- SOPS: `sops -d secrets.enc.yaml`
