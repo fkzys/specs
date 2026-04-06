@@ -1,12 +1,37 @@
-# LLM PROJECT CONTEXT — fkzys Ecosystem
+# fkzys Ecosystem Specification
 
-You are an assistant for creating system utilities, packages, and infrastructure for Arch Linux.
-When generating code, strictly follow the rules below. They are derived from real projects, not generic best practices.
+This document defines **ecosystem-wide conventions** for all projects in the fkzys ecosystem. It serves two purposes:
+
+1. **Human-readable specification** — reference for developers working across multiple projects
+2. **Machine-consumable context** — provides LLM assistants with the rules and patterns needed to generate code that conforms to ecosystem standards
+
+When generating code for any fkzys project, assistants must follow the rules defined in this specification. They are derived from real projects, not generic best practices.
+
+## Status
+
+| Attribute | Value |
+|-----------|-------|
+| Scope | Ecosystem-wide (all fkzys projects) |
+| Authority | Definitive — overrides project-local conventions where conflicts exist |
+| Last updated | 2026-04-06 |
+| License | CC BY-SA 4.0 (text) / AGPL-3.0-or-later (code patterns) — see §14 |
+
+## How to Read This Document
+
+- **Sections 0–10, 13** — Technical specification: patterns, conventions, code structures
+- **Section 11** — Code generation protocol: rules for assistants generating code in this ecosystem
+- **Section 12** — Quick reference: common snippets and commands
+- **Section 14** — Licensing
+
+Project-specific information lives in the **repository's own documentation**:
+- `README.md` — build, install, dependencies, configuration
+- `CHANGELOG.md` — version history
+- `TODO.md` — planned work
+- `tests.md` — test suite documentation (per-project, but follows ecosystem testing patterns)
 
 ## 0. SCOPE & APPLICABILITY
 
-This specification defines **ecosystem-wide patterns** — conventions that apply to
-all projects in the fkzys ecosystem, regardless of language or purpose.
+This specification defines **ecosystem-wide patterns** — conventions that apply to all projects in the fkzys ecosystem, regardless of language or purpose.
 
 ### What belongs here
 - Universal patterns: error handling, config parsing, test structure, Makefile conventions
@@ -21,20 +46,9 @@ all projects in the fkzys ecosystem, regardless of language or purpose.
 - Changelog entries, TODO lists, screenshots
 - Infrastructure-as-code deployment patterns (Jinja2 services, SOPS secrets, Terraform) — covered in §9
 
-Project-specific information lives in the **repository's own documentation**:
-- `README.md` — build, install, dependencies, configuration
-- `CHANGELOG.md` — version history
-- `TODO.md` — planned work
-- `tests.md` — test suite documentation (per-project, but follows ecosystem testing patterns)
-
-When in doubt: if a rule wouldn't make sense in a completely unrelated project
-(e.g. a Go CLI tool or a Python daemon), it doesn't belong in this specification.
-
 ### What is NOT a package
 
-The following project types are **infrastructure or data**, not installable packages.
-Conventions like `Makefile` (PREFIX/DESTDIR), `depends`, `bin/`, `lib/`,
-`tests/README.md`, and `verify-lib` do not apply to them:
+The following project types are **infrastructure or data**, not installable packages. Conventions like `Makefile` (PREFIX/DESTDIR), `depends`, `bin/`, `lib/`, `tests/README.md`, and `verify-lib` do not apply to them:
 
 | Type | Examples | What applies |
 |------|----------|--------------|
@@ -168,7 +182,7 @@ load_config() {
 cleanup() {
     local exit_code=$?
     set +e
-    [[ $exit_code -ne 0 ]] && echo ":: Cleaning up..."
+    [[ $exit_code -ne 0 ]] && echo ":: cleaning up..."
     # ... cleanup logic ...
     return $exit_code
 }
@@ -887,6 +901,7 @@ Standard pytest suites. No system access — all filesystem operations use `tmp_
 - No root privileges required
 - No real disks, partitions, or volumes are touched
 - Python tests use pytest's `tmp_path` fixture
+```
 
 ### `test_harness.sh` — Standard Pattern
 ```bash
@@ -899,7 +914,6 @@ Standard pytest suites. No system access — all filesystem operations use `tmp_
 set -uo pipefail
 # Note: no -e. Tests must continue running when assertions fail
 # so failures can be counted and reported by summary().
-```
 
 PASS=0; FAIL=0; TESTS=0
 
@@ -1080,6 +1094,7 @@ Guarded by `skipIfNotRoot`. Run via `make test-root` (sudo).
 - No root privileges required except `internal/perms` apply tests
 - No real home directories or system files are touched
 - Root-only tests skip with `t.Skip("requires root")` when run as non-root
+```
 
 ### C# / .NET: `tests.md`
 ```markdown
@@ -1116,6 +1131,7 @@ dotnet test subs2srs.Tests/subs2srs.Tests.csproj --filter "FullyQualifiedName~Ut
 - No root privileges required
 - No real media files, subtitles, or system paths are touched
 - Tests run sequentially to avoid singleton pollution
+```
 
 ## 8. COMPLETIONS
 
@@ -1178,10 +1194,7 @@ complete -F _project_name project-name
 
 ## 9. INFRASTRUCTURE (Python + Jinja2 + SOPS)
 
-Infrastructure projects (`infra`, `tf-infra`) manage server
-configurations, DNS records, and service deployments. They are **not installable
-packages** — conventions like `Makefile` (PREFIX/DESTDIR), `depends`, `bin/`,
-`lib/`, `tests/README.md`, and `verify-lib` do not apply.
+Infrastructure projects (`infra`, `tf-infra`) manage server configurations, DNS records, and service deployments. They are **not installable packages** — conventions like `Makefile` (PREFIX/DESTDIR), `depends`, `bin/`, `lib/`, `tests/README.md`, and `verify-lib` do not apply.
 
 What does apply:
 - §4 Python patterns: entry points, error handling (`sys.exit(1)`, stderr), SOPS helper
@@ -1239,9 +1252,9 @@ gitpkg:verify-lib
 - `gitpkg:<name>` — Project managed by `gitpkg`. Resolved from configured base URLs or collections. Cloned, built, and installed via `gitpkg install <name>`.
 - `# comment` — Ignored by parsers.
 
-## 11. CODE GENERATION PROTOCOL (LLM INSTRUCTIONS)
+## 11. CODE GENERATION PROTOCOL
 
-> **Note:** This section governs how you generate code, not the code itself. Apply these rules when responding to requests in this ecosystem.
+This section defines how code must be generated when working with fkzys projects. Assistants and developers creating new code must follow these rules.
 
 1. **Verify structure** (`Makefile`, `depends`, `lib/`, `tests/` or `tests.md`) before adding files. For infrastructure projects (§9), these do not apply.
 2. **Apply standards automatically**: `set -euo pipefail` (except in test files, wrappers, and guard scripts — see §2), whitelist config parser, `verify-lib` sourcing, `printf -v` instead of `eval`, explicit shopt restore.
