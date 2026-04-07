@@ -13,7 +13,7 @@ When generating code for any fkzys project, assistants must follow the rules def
 |-----------|-------|
 | Scope | Ecosystem-wide (all fkzys projects) |
 | Authority | Definitive — overrides project-local conventions where conflicts exist |
-| Last updated | 2026-04-06 |
+| Last updated | 2026-04-08 |
 | License | CC BY-SA 4.0 (text) / AGPL-3.0-or-later (code patterns) — see §14 |
 
 ## How to Read This Document
@@ -884,7 +884,8 @@ CGO_ENABLED=0 go build -trimpath -buildmode=pie -ldflags "-X main.version=$(VERS
 - **`tests.md`** — for Go and C# projects where tests are part of the build system (`*_test.go` packages, `*.Tests.csproj` projects) and there is no standalone `tests/` script directory. The file lives at the repository root.
 
 ### Shell/Python: `tests/README.md`
-```markdown
+
+````markdown
 # Tests
 
 ## Overview
@@ -925,7 +926,7 @@ Standard pytest suites. No system access — all filesystem operations use `tmp_
 - No root privileges required
 - No real disks, partitions, or volumes are touched
 - Python tests use pytest's `tmp_path` fixture
-```
+````
 
 ### `test_harness.sh` — Standard Pattern
 ```bash
@@ -1081,7 +1082,8 @@ summary() {
 ```
 
 ### Go: `tests.md`
-```markdown
+
+````markdown
 # Tests
 
 ## Overview
@@ -1118,10 +1120,11 @@ Guarded by `skipIfNotRoot`. Run via `make test-root` (sudo).
 - No root privileges required except `internal/perms` apply tests
 - No real home directories or system files are touched
 - Root-only tests skip with `t.Skip("requires root")` when run as non-root
-```
+````
 
 ### C# / .NET: `tests.md`
-```markdown
+
+````markdown
 # Tests
 
 ## Overview
@@ -1155,7 +1158,7 @@ dotnet test subs2srs.Tests/subs2srs.Tests.csproj --filter "FullyQualifiedName~Ut
 - No root privileges required
 - No real media files, subtitles, or system paths are touched
 - Tests run sequentially to avoid singleton pollution
-```
+````
 
 ## 8. COMPLETIONS
 
