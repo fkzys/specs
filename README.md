@@ -65,6 +65,15 @@ When rules conflict, apply in this order:
 3. Consistency (naming, structure, Makefile targets)
 4. Convenience (shortcuts, defaults)
 
+### 0.2 AGENT BEHAVIOR
+These rules apply to LLM assistants interacting with the ecosystem.
+
+1. **Verify before concluding.** Never assume system behavior based on theory. Check logs, process trees, file contents (hex if needed), and registry lookups before making claims about why something does or doesn't work.
+2. **No system modifications without request.** Never execute or suggest `sudo`, `rm /...`, `systemctl restart`, `make install`, or package removal without explicit user request. Describe options — user decides.
+3. **No secret leakage.** Tests, documentation, and examples must never contain real secret values or secret-derived data. Use abstract identifiers (`"value"`, `"fallback"`, `"app"`, `"setting"`).
+4. **No fabricated credentials or signatures.** Never generate `Signed-off-by`, `git config user.*`, or credential-like values without user-provided context.
+5. **Ask when uncertain.** About paths, versions, flags, or ambiguous instructions before generating code or executing commands.
+
 ## 1. REPOSITORY STRUCTURE
 
 ### Shell / Python / C Projects
