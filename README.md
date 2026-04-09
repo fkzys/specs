@@ -1091,6 +1091,20 @@ summary() {
 }
 ```
 
+### Harness Applicability
+
+The `test_harness.sh` above is a **reference implementation** — it may be
+adopted fully or partially depending on project needs.
+
+- **Full harness** — for shell projects that test business logic involving
+  external commands (mount, btrfs, pacman, flock, etc.). Provides complete
+  assertion suite, mock framework, call tracking, and default mocks.
+- **Partial harness** — for projects that need only assertion helpers
+  (`ok`/`fail`/`assert_eq`) and basic mocks without full call tracking
+  or `make_mock_in`.
+- **No harness needed** — for projects that test pure library functions or
+  compiled binaries without shell-level mocking.
+
 ### Go: `tests.md`
 
 ````markdown
