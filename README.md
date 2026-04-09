@@ -1566,7 +1566,7 @@ This applies to both human-authored and LLM-generated commits. When LLM assistan
 All commits in ecosystem projects MUST follow the Conventional Commits format:
 
 ```
-<type>: <description>
+<type>(<scope>): <description>
 ```
 
 | Type | Purpose |
@@ -1578,6 +1578,8 @@ All commits in ecosystem projects MUST follow the Conventional Commits format:
 | `refactor` | Code change, no behavior change |
 | `test` | Test additions or changes |
 | `chore` | Maintenance, dependency updates, config |
+
+Scope is optional but encouraged for targeted changes: `fix(atomic-gc):`, `test(keys-vault):`, `ci(btrfs-file-history):`.
 
 Examples:
 
