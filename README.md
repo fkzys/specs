@@ -1278,7 +1278,7 @@ What the tool does, how it works.
 
 # COMMANDS
 
-**apply** [-n|--dry-run]
+**apply** [-n|\--dry-run]
 :   What this command does.
 
 **status**
@@ -1286,10 +1286,10 @@ What the tool does, how it works.
 
 # OPTIONS
 
-**-h**, **--help**
+**-h**, **\--help**
 :   Show usage and exit.
 
-**-V**, **--version**
+**-V**, **\--version**
 :   Print version and exit.
 
 # EXAMPLES
