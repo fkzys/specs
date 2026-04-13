@@ -13,7 +13,7 @@ When generating code for any fkzys project, assistants must follow the rules def
 |-----------|-------|
 | Scope | Ecosystem-wide (all fkzys projects) |
 | Authority | Definitive — overrides project-local conventions where conflicts exist |
-| Last updated | 2026-04-09 |
+| Last updated | 2026-04-14 |
 | License | CC BY-SA 4.0 (text) / AGPL-3.0-or-later (code patterns) — see §14 |
 
 ## How to Read This Document
@@ -343,6 +343,31 @@ clean:
 
 test:
 	bash tests/test.sh
+```
+
+### Test Target: Multiple Test Files (`@for` loop)
+
+For shell projects with multiple test scripts, the `test` target SHOULD use
+a `@for` loop with `UNIT_TESTS` variable. This provides visible separators
+between test files and consistent failure handling:
+
+```makefile
+UNIT_TESTS = \
+	tests/test_config.sh \
+	tests/test_cli.sh \
+	tests/test_commands.sh
+
+test:
+	@for t in $(UNIT_TESTS); do \
+		echo ""; \
+		echo "━━━ $$t ━━━"; \
+		bash "$$t" || exit 1; \
+	done
+```
+
+The `@` prefix suppresses the loop line itself. `echo ""` and `echo "━━━"`
+provide visual separation. `|| exit 1` stops on the first failure. The
+`UNIT_TESTS` variable makes it easy to add or remove test files.
 
 install:
 	install -Dm755 bin/project $(DESTDIR)$(BINDIR)/project
@@ -1302,6 +1327,28 @@ Coverage is reported per file with color coding (green ≥80%, yellow ≥50%, re
 
 CI MAY enforce minimum coverage thresholds using `--min-coverage`.
 
+### Coverage Collection (BASH_ENV + DEBUG trap)
+
+Shell coverage tools work via `BASH_ENV` + `DEBUG` trap (`set -T`) to
+collect line-level coverage without modifying source files. Implementations
+MUST follow these rules:
+
+**1. `realpath -m` for ALL paths, not just relative.** Absolute paths
+containing `../` (e.g. `/proj/tests/../bin/script`) must be normalized
+before glob filtering. If path resolution is only applied to relative
+paths, the `../` segment remains and filters like `*/tests/*` will match
+incorrectly, excluding production files from the report.
+
+**2. `BASH_SOURCE[1]` with fallback to `BASH_SOURCE[0]`.** Child bash
+processes launched via shebang exec (e.g. `./bin/script`) have an empty
+`BASH_SOURCE[1]`. Without fallback to `BASH_SOURCE[0]`, coverage data
+for these files is silently lost.
+
+**3. NO `set +T` / `set -T` inside the DEBUG trap.** Toggling `set -T`
+within the trap creates a race condition — the trap fires on the `set -T`
+command itself, producing spurious entries and breaking inheritance for
+child processes. Use early `return` instead of toggling trace mode.
+
 ## 8. COMPLETIONS
 
 ### Zsh (`_cmd`)
@@ -1611,6 +1658,23 @@ This section defines how code must be generated when working with fkzys projects
 - Go build: `CGO_ENABLED=0 go build -trimpath -buildmode=pie -ldflags "-X main.version=$(VERSION)"`
 - C# build: `dotnet build Project/Project.csproj -c Release`
 - Test run: `make test` or `bash tests/test.sh` or `python -m pytest tests/ -v` or `go test ./...` or `dotnet test Tests/Tests.csproj`
+- Makefile test loop (shell, multiple files):
+  ```
+  UNIT_TESTS = tests/test_a.sh tests/test_b.sh
+  test:
+  	@for t in $(UNIT_TESTS); do \
+  		echo ""; echo "━━━ $$t ━━━"; \
+  		bash "$$t" || exit 1; \
+  	done
+  ```
+- CI test loop (shell, multiple files):
+  ```yaml
+  - run: |
+      for t in tests/test_config.sh tests/test_cli.sh; do
+        echo "━━━ $t ━━━"
+        bash "$t" || exit 1
+      done
+  ```
 - Coverage: `bash-coverage -p ./project` or `bash-coverage --min-coverage 80 -- make test`
 - Man YAML: `title: NAME\nsection: 8\nheader: System Administration\nfooter: project-name` (no `date`)
 - Man compile: `pandoc -s -t man cmd.8.md -o cmd.8`
@@ -1770,8 +1834,8 @@ Example — Shell project with multiple test files:
       - uses: actions/checkout@v6
       - run: |
           for t in tests/test_config.sh tests/test_cli.sh tests/test_commands.sh; do
-            echo "━━━ $$t ━━━"
-            bash "$$t" || exit 1
+            echo "━━━ $t ━━━"
+            bash "$t" || exit 1
           done
 ```
 
